@@ -1,0 +1,183 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+
+  :root,
+  :root[data-theme="emerald"] {
+    /* Ultra-Premium Emerald & Orange Dark Theme */
+    --background: #0a0f0f;
+    --surface: rgba(22, 33, 33, 0.85);
+    /* Deep frosty teal */
+    --surface-elevated: rgba(30, 43, 43, 0.95);
+    --surface-muted: rgba(20, 28, 28, 0.6);
+
+    --foreground: #f0fdfa;
+    /* Teal-50 / Near white */
+    --foreground-muted: #99a8a8;
+    --foreground-subtle: #556666;
+
+    --border: rgba(255, 255, 255, 0.08);
+    --border-light: rgba(255, 255, 255, 0.03);
+
+    /* Primary: Bright Orange (Cronus active items) */
+    --primary: #f97316;
+    --primary-hover: #fb923c;
+    --primary-subtle: rgba(249, 115, 22, 0.15);
+    --primary-foreground: #ffffff;
+
+    /* Semantic Colors - High Contrast */
+    --success: #10b981;
+    /* Mint Green */
+    --success-subtle: rgba(16, 185, 129, 0.15);
+    --success-foreground: #ffffff;
+
+    --warning: #f59e0b;
+    --warning-subtle: rgba(245, 158, 11, 0.15);
+    --warning-foreground: #ffffff;
+
+    --danger: #ef4444;
+    --danger-subtle: rgba(239, 68, 68, 0.15);
+    --danger-foreground: #ffffff;
+
+    --info: #0ea5e9;
+    --info-subtle: rgba(14, 165, 233, 0.15);
+    --info-foreground: #ffffff;
+  }
+
+  :root[data-theme="light"] {
+    /* Prisma Light Theme */
+    --background: #f8fafc;
+    --surface: rgba(255, 255, 255, 0.7);
+    --surface-elevated: rgba(255, 255, 255, 0.9);
+    --surface-muted: rgba(241, 245, 249, 0.6);
+
+    --foreground: #0f172a;
+    --foreground-muted: #64748b;
+    --foreground-subtle: #94a3b8;
+
+    --border: rgba(15, 23, 42, 0.1);
+    --border-light: rgba(15, 23, 42, 0.05);
+
+    /* Primary: Vibrant Indigo/Purple */
+    --primary: #6366f1;
+    --primary-hover: #4f46e5;
+    --primary-subtle: rgba(99, 102, 241, 0.15);
+    --primary-foreground: #ffffff;
+
+    /* Semantic Colors - High Contrast, Deep Subtles */
+    --success: #059669;
+    --success-subtle: rgba(5, 150, 105, 0.15);
+    --success-foreground: #ffffff;
+
+    --warning: #d97706;
+    --warning-subtle: rgba(217, 119, 6, 0.15);
+    --warning-foreground: #ffffff;
+
+    --danger: #dc2626;
+    --danger-subtle: rgba(220, 38, 38, 0.15);
+    --danger-foreground: #ffffff;
+
+    --info: #6366f1;
+    --info-subtle: rgba(99, 102, 241, 0.15);
+    --info-foreground: #ffffff;
+  }
+
+  :root[data-theme="oled"] {
+    /* Ultra-Premium Enterprise Dark Mode */
+    --background: #000000;
+    --surface: rgba(10, 10, 10, 0.85);
+    --surface-elevated: rgba(17, 17, 17, 0.95);
+    --surface-muted: rgba(23, 23, 23, 0.6);
+
+    --foreground: #ffffff;
+    --foreground-muted: #a1a1aa;
+    --foreground-subtle: #71717a;
+
+    --border: rgba(255, 255, 255, 0.08);
+    --border-light: rgba(255, 255, 255, 0.03);
+
+    /* Primary: Bright Electric Blue */
+    --primary: #3b82f6;
+    --primary-hover: #60a5fa;
+    --primary-subtle: rgba(59, 130, 246, 0.15);
+    --primary-foreground: #ffffff;
+
+    /* Semantic Colors - High Contrast, Deep Subtles */
+    --success: #10b981;
+    --success-subtle: rgba(16, 185, 129, 0.15);
+    --success-foreground: #ffffff;
+
+    --warning: #f59e0b;
+    --warning-subtle: rgba(245, 158, 11, 0.15);
+    --warning-foreground: #ffffff;
+
+    --danger: #ef4444;
+    --danger-subtle: rgba(239, 68, 68, 0.15);
+    --danger-foreground: #ffffff;
+
+    --info: #3b82f6;
+    --info-subtle: rgba(59, 130, 246, 0.15);
+    --info-foreground: #ffffff;
+  }
+}
+
+@layer base {
+  body {
+    @apply bg-background text-foreground antialiased selection:bg-primary selection:text-primary-foreground;
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  }
+
+  h1,
+  h2,
+  h3,
+  h4,
+  h5,
+  h6 {
+    @apply font-bold tracking-tight text-foreground;
+  }
+}
+
+@layer utilities {
+  .flex-center {
+    @apply flex items-center justify-center;
+  }
+
+  .glass-panel {
+    @apply bg-surface/80 backdrop-blur-xl border border-border shadow-card;
+  }
+
+  .text-balance {
+    text-wrap: balance;
+  }
+}
+
+/* Custom Scrollbar for a premium feel */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  @apply bg-foreground-subtle rounded-full hover:bg-foreground-muted transition-colors;
+}
+
+/* Base focus styles to ensure accessibility without breaking design */
+:focus-visible {
+  @apply outline-none ring-2 ring-primary ring-offset-2 ring-offset-background;
+}
+
+/* Fix autofill turning inputs white in Chrome */
+input:-webkit-autofill,
+input:-webkit-autofill:hover,
+input:-webkit-autofill:focus,
+input:-webkit-autofill:active {
+  -webkit-box-shadow: 0 0 0 30px #18181b inset !important;
+  -webkit-text-fill-color: white !important;
+  transition: background-color 5000s ease-in-out 0s;
+}
