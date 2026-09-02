@@ -1,0 +1,2120 @@
+{
+  "name": "DocSure AI - Document Verification",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "creatorhub/docsure/verify",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "a49ff653-cd64-4027-822e-07b37fec0bc1",
+      "name": "Document Upload",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -2688,
+        1040
+      ],
+      "webhookId": "e9bbdcdb-7620-4ec8-9edf-87cba48b30b2"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================\n// PRODUCTION-GRADE UNIVERSAL FILE INGESTION\n// ============================================================\n\n// --- Configurable limits (single source of truth) ---\nvar MAX_FILE_SIZE = 20 * 1024 * 1024; // 20 MB\nvar SUPPORTED_FORMATS = [\n  \"jpg\",\"jpeg\",\"png\",\"webp\",\"bmp\",\"tiff\",\"tif\",\"heic\",\"heif\",\n  \"pdf\",\"doc\",\"docx\",\"rtf\",\"txt\",\"csv\",\"xls\",\"xlsx\"\n];\n\nvar item = $input.first();\nvar body = (item.json && item.json.body) ? item.json.body : (item.json || {});\n// --- Auto-detect binary property key ---\n// n8n stores multipart files under the form-field name the client used.\n// This may be \"file\", \"data\", \"document\", \"upload\", \"image\", etc.\n// Scan ALL keys and use the first one that carries real binary content.\nvar binKey = null;\nvar bin    = null;\nif (item.binary && typeof item.binary === \"object\") {\n  var binKeys = Object.keys(item.binary);\n  for (var ki = 0; ki < binKeys.length; ki++) {\n    var candidate = item.binary[binKeys[ki]];\n    if (candidate && (candidate.data || candidate.mimeType || candidate.fileName || candidate.fileSize)) {\n      binKey = binKeys[ki];\n      bin    = candidate;\n      break;\n    }\n  }\n}\n\n// originalFieldName = the multipart form-field name the client chose.\n// This is NOT the actual filename — e.g. field \"download.pdf\" may carry\n// a file called \"download (1).pdf\". They are completely separate.\nvar originalFieldName = binKey || \"\";\n\n// --- Context fields ---\nvar applicationId       = body.applicationId || body.application_id || \"APP-UNKNOWN\";\nvar documentId          = body.documentId    || body.document_id    || (\"DOC-\" + Date.now());\nvar requestId           = \"REQ-\" + Date.now() + \"-\" + Math.floor(Math.random() * 100000);\nvar expectedDocumentType = (body.expectedDocumentType || body.expected_document_type || \"\").toString().toUpperCase().trim();\nvar fileId              = \"FI-\" + requestId;\n\n// --- Binary metadata ---\nvar reportedFileName  = (bin && bin.fileName) || body.fileName || body.file_name || \"\";\nvar reportedMimeType  = ((bin && bin.mimeType) || body.mimeType || body.mime_type || \"\").toString().toLowerCase().trim();\nvar fileSize          = Number((bin && (bin.fileSize || bin.fileLength)) || body.fileSize || body.file_size || 0) || 0;\nvar hasFile           = (bin !== null) || !!(body.mimeType || body.mime_type);\n\nfunction getExtension(name) {\n  if (!name) return \"\";\n  var parts = name.toLowerCase().split(\".\");\n  return parts.length > 1 ? parts[parts.length - 1].replace(/[^a-z0-9]/g,\"\") : \"\";\n}\nvar reportedExtension = getExtension(reportedFileName);\n\n// --- Try to access raw binary for magic-byte detection ---\nvar rawBuf = null;\ntry {\n  if (bin && bin.data && typeof bin.data === \"string\" && bin.data.length > 0) {\n    rawBuf = Buffer.from(bin.data, \"base64\");\n  }\n} catch(e) { rawBuf = null; }\n\n// --- Magic-byte signature detection ---\nfunction detectMagicMime(buf) {\n  if (!buf || buf.length < 4) return null;\n  var b = buf;\n  if (b[0]===0xFF && b[1]===0xD8 && b[2]===0xFF) return \"image/jpeg\";\n  if (b[0]===0x89 && b[1]===0x50 && b[2]===0x4E && b[3]===0x47) return \"image/png\";\n  // PDF: scan first 1024 bytes (%PDF- may not start at byte 0)\n  var pdfLim = Math.min(buf.length - 4, 1024);\n  for (var psi = 0; psi <= pdfLim; psi++) {\n    if (buf[psi]===0x25 && buf[psi+1]===0x50 && buf[psi+2]===0x44 && buf[psi+3]===0x46) return \"application/pdf\";\n  }\n  if (b[0]===0x52 && b[1]===0x49 && b[2]===0x46 && b[3]===0x46 &&\n      buf.length >= 12 && b[8]===0x57 && b[9]===0x45 && b[10]===0x42 && b[11]===0x50) return \"image/webp\";\n  if (b[0]===0x42 && b[1]===0x4D) return \"image/bmp\";\n  if (b[0]===0x49 && b[1]===0x49 && b[2]===0x2A && b[3]===0x00) return \"image/tiff\";\n  if (b[0]===0x4D && b[1]===0x4D && b[2]===0x00 && b[3]===0x2A) return \"image/tiff\";\n  if (b[0]===0xD0 && b[1]===0xCF && b[2]===0x11 && b[3]===0xE0) return \"application/x-ole-storage\";\n  if (b[0]===0x50 && b[1]===0x4B && b[2]===0x03 && b[3]===0x04) return \"application/zip\";\n  if (buf.length >= 5 && b[0]===0x7B && b[1]===0x5C && b[2]===0x72 && b[3]===0x74 && b[4]===0x66) return \"text/rtf\";\n  if (buf.length >= 12) {\n    var ftyp = buf.slice(4,8).toString(\"ascii\");\n    if (ftyp === \"ftyp\") {\n      var brand = buf.slice(8,12).toString(\"ascii\");\n      if ([\"heic\",\"heis\",\"heim\",\"hevc\",\"hevx\"].indexOf(brand) !== -1) return \"image/heic\";\n      if ([\"mif1\",\"msf1\",\"miaf\"].indexOf(brand) !== -1) return \"image/heif\";\n    }\n  }\n  if (b[0]===0x47 && b[1]===0x49 && b[2]===0x46) return \"image/gif\";\n  return null;\n}\n\nvar magicMime = rawBuf ? detectMagicMime(rawBuf) : null;\n\nvar detectedMimeType  = magicMime || reportedMimeType || \"application/octet-stream\";\nvar detectedExtension = reportedExtension;\nvar mimeExtMismatch   = !!(magicMime && reportedMimeType && magicMime !== reportedMimeType);\n\nif (detectedMimeType === \"application/x-ole-storage\") {\n  if ([\"xls\",\"xlt\",\"xlm\"].indexOf(reportedExtension) !== -1) {\n    detectedMimeType = \"application/vnd.ms-excel\";\n  } else {\n    detectedMimeType = \"application/msword\";\n  }\n}\nif (detectedMimeType === \"application/zip\") {\n  if ([\"xlsx\",\"xlsm\"].indexOf(reportedExtension) !== -1) {\n    detectedMimeType = \"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet\";\n  } else if ([\"docx\",\"docm\"].indexOf(reportedExtension) !== -1) {\n    detectedMimeType = \"application/vnd.openxmlformats-officedocument.wordprocessingml.document\";\n  }\n}\n\nvar fileHash   = \"\";\nvar hashMethod = \"fnv\";\ntry {\n  var crypto = require(\"crypto\");\n  if (rawBuf) {\n    fileHash   = crypto.createHash(\"sha256\").update(rawBuf).digest(\"hex\");\n    hashMethod = \"sha256\";\n  } else {\n    var metaStr = [reportedFileName, detectedMimeType, String(fileSize), applicationId].join(\"|\");\n    fileHash   = \"meta-\" + crypto.createHash(\"sha256\").update(metaStr).digest(\"hex\");\n    hashMethod = \"sha256-meta\";\n  }\n} catch(e) {\n  var fnv = function(str) {\n    var h = 0x811c9dc5;\n    for (var i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = (h * 0x01000193) >>> 0; }\n    return (\"00000000\" + h.toString(16)).slice(-8);\n  };\n  var basis = [reportedFileName, detectedMimeType, String(fileSize), applicationId].join(\"|\");\n  fileHash   = \"fh_\" + fnv(basis) + fnv(basis.split(\"\").reverse().join(\"\"));\n  hashMethod = \"fnv\";\n}\n\nvar IMAGE_MIMES       = [\"image/jpeg\",\"image/png\",\"image/webp\",\"image/bmp\",\"image/tiff\",\"image/heic\",\"image/heif\",\"image/gif\"];\nvar IMAGE_EXTS        = [\"jpg\",\"jpeg\",\"png\",\"webp\",\"bmp\",\"tiff\",\"tif\",\"heic\",\"heif\"];\nvar SPREADSHEET_MIMES = [\"text/csv\",\"application/vnd.ms-excel\",\n                         \"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet\"];\nvar SPREADSHEET_EXTS  = [\"csv\",\"xls\",\"xlsx\"];\nvar OFFICE_MIMES      = [\"application/msword\",\n                         \"application/vnd.openxmlformats-officedocument.wordprocessingml.document\",\n                         \"text/rtf\",\"application/rtf\"];\nvar OFFICE_EXTS       = [\"doc\",\"docx\",\"rtf\"];\nvar TEXT_MIMES        = [\"text/plain\"];\nvar TEXT_EXTS         = [\"txt\"];\n\nfunction classify(mime, ext) {\n  if (mime === \"application/pdf\" || ext === \"pdf\") return \"PDF\";\n  if (IMAGE_MIMES.indexOf(mime) !== -1 || IMAGE_EXTS.indexOf(ext) !== -1) return \"IMAGE\";\n  if (SPREADSHEET_MIMES.indexOf(mime) !== -1 || SPREADSHEET_EXTS.indexOf(ext) !== -1) return \"SPREADSHEET\";\n  if (OFFICE_MIMES.indexOf(mime) !== -1 || OFFICE_EXTS.indexOf(ext) !== -1) return \"OFFICE\";\n  if (TEXT_MIMES.indexOf(mime) !== -1 || TEXT_EXTS.indexOf(ext) !== -1) return \"TEXT\";\n  return \"UNSUPPORTED\";\n}\nvar fileCategory = classify(detectedMimeType, detectedExtension);\n\nvar fileKind;\nif (fileCategory === \"IMAGE\") fileKind = \"image\";\nelse if (fileCategory === \"PDF\") fileKind = \"pdf\";\nelse if (fileCategory === \"OFFICE\" || fileCategory === \"TEXT\") fileKind = \"office\";\nelse if (fileCategory === \"SPREADSHEET\") fileKind = \"spreadsheet\";\nelse fileKind = \"unsupported\";\n\nvar fileSubKind = null;\nif (fileCategory === \"TEXT\" || detectedExtension === \"txt\") fileSubKind = \"txt\";\nelse if (detectedExtension === \"rtf\" || detectedMimeType.indexOf(\"rtf\") !== -1) fileSubKind = \"rtf\";\nelse if (detectedExtension === \"docx\" || detectedMimeType.indexOf(\"wordprocessingml\") !== -1) fileSubKind = \"docx\";\nelse if (detectedExtension === \"doc\" || detectedMimeType.indexOf(\"msword\") !== -1) fileSubKind = \"doc\";\n\n// isEmpty: use rawBuf length when decoded; fall back to descriptor fileSize\n// (in binaryMode:separate the raw bytes are stored externally and rawBuf\n//  may be null inside the Code node even when a real file was uploaded).\nvar isEmpty;\nif (rawBuf !== null) {\n  isEmpty = rawBuf.length === 0;\n} else if (bin && fileSize > 0) {\n  isEmpty = false;\n} else {\n  isEmpty = !hasFile || fileSize === 0;\n}\nvar isReadable = hasFile && !isEmpty;\n\nvar isCorrupted = false;\n// Only flag CORRUPTED when magic POSITIVELY finds a DIFFERENT format class.\n// magicMime===null = no signature matched = NOT corruption (many valid files).\nif (rawBuf && rawBuf.length >= 8 && magicMime !== null) {\n  var IMG_CK=[\"image/jpeg\",\"image/png\",\"image/webp\",\"image/bmp\",\"image/tiff\",\"image/heic\",\"image/heif\",\"image/gif\"];\n  function mCatFn(m){if(m===\"application/pdf\")return\"PDF\";if(IMG_CK.indexOf(m)!==-1)return\"IMAGE\";if(m===\"application/zip\"||m===\"application/x-ole-storage\"||m===\"text/rtf\")return\"OFFICE\";return\"OTHER\";}\n  var mCat=mCatFn(magicMime),rCat=mCatFn(reportedMimeType);\n  if(mCat!==\"OTHER\"&&rCat!==\"OTHER\"&&reportedMimeType&&reportedMimeType!==\"application/octet-stream\"&&mCat!==rCat){isCorrupted=true;}\n}\n\nvar isValid   = true;\nvar errorCode = null;\nvar message   = \"\";\n\nif (!hasFile) {\n  isValid = false; errorCode = \"INVALID_FILE\";    message = \"No file was uploaded.\";\n} else if (isEmpty) {\n  isValid = false; errorCode = \"EMPTY_FILE\";      message = \"The uploaded file is empty.\";\n} else if (fileSize > MAX_FILE_SIZE) {\n  isValid = false; errorCode = \"FILE_TOO_LARGE\";  message = \"File exceeds the \" + Math.round(MAX_FILE_SIZE / 1024 / 1024) + \"MB limit.\";\n} else if (isCorrupted) {\n  isValid = false; errorCode = \"CORRUPTED_FILE\";  message = \"The file appears to be corrupted or is not a recognised format.\";\n}\n\nvar normalizedMeta = {\n  fileId: fileId,\n  fileName: reportedFileName,\n  extension: detectedExtension,\n  mimeType: detectedMimeType,\n  fileCategory: fileCategory,\n  size: fileSize,\n  hash: fileHash,\n  hashMethod: hashMethod,\n  isReadable: isReadable,\n  isSupported: fileCategory !== \"UNSUPPORTED\",\n  binaryKey: binKey,\n};\n\nreturn [{\n  json: {\n    requestId: requestId,\n    applicationId: applicationId,\n    documentId: documentId,\n    expectedDocumentType: expectedDocumentType,\n    fileId: fileId,\n    fileName: reportedFileName,\n    fileSize: fileSize,\n    fileHash: fileHash,\n    hashMethod: hashMethod,\n    mimeType: detectedMimeType,\n    detectedMimeType: detectedMimeType,\n    detectedExtension: detectedExtension,\n    reportedMimeType: reportedMimeType,\n    reportedExtension: reportedExtension,\n    mimeExtMismatch: mimeExtMismatch,\n    fileCategory: fileCategory,\n    fileKind: fileKind,\n    fileSubKind: fileSubKind,\n    binaryKey: binKey,\n    isReadable: isReadable,\n    isEmpty: isEmpty,\n    isCorrupted: isCorrupted,\n    isSupported: fileCategory !== \"UNSUPPORTED\",\n    isValid: isValid,\n    errorCode: errorCode,\n    message: message,\n    maxFileSizeMB: Math.round(MAX_FILE_SIZE / 1024 / 1024),\n    supportedFormats: SUPPORTED_FORMATS,\n    originalFieldName: originalFieldName,\n    normalizedMeta: normalizedMeta,\n  },\n  // Normalize binary: whatever key the client used, output as \"data\"\n  // so all downstream extraction nodes work without modification.\n  binary: (bin && binKey && binKey !== \"data\")\n    ? Object.assign({}, item.binary || {}, { data: bin })\n    : (item.binary || {}),\n}];"
+      },
+      "id": "1895df8e-8fd4-4999-b657-20693a0fc95d",
+      "name": "Validate File",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -2464,
+        1040
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "valid",
+              "leftValue": "={{ $json.isValid }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "0c47c307-f1a5-402d-9393-c394a3bda6a1",
+      "name": "Is File Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -2240,
+        1040
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": false,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 1
+                },
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.fileKind }}",
+                    "rightValue": "image",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ]
+              },
+              "renameOutput": true,
+              "outputKey": "image"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": false,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 1
+                },
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.fileKind }}",
+                    "rightValue": "pdf",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ]
+              },
+              "renameOutput": true,
+              "outputKey": "pdf"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": false,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 1
+                },
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.fileKind }}",
+                    "rightValue": "office",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ]
+              },
+              "renameOutput": true,
+              "outputKey": "office"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": false,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 1
+                },
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.fileKind }}",
+                    "rightValue": "spreadsheet",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ]
+              },
+              "renameOutput": true,
+              "outputKey": "spreadsheet"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra",
+          "renameFallbackOutput": "unsupported"
+        }
+      },
+      "id": "a3f1b8b6-1ae9-473b-94c0-9927a8ca77a4",
+      "name": "Route By File Type",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.4,
+      "position": [
+        -1792,
+        1024
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "image",
+        "operation": "analyze",
+        "modelId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "models/gemini-3.6-flash",
+          "cachedResultName": "Gemini 3.6 Flash"
+        },
+        "text": "You are a strict KYC document detector and classifier for Indian identity and financial documents. Do NOT assume every image is a document. A photo of a cat, car, scenery, food, product, or a plain selfie/person is NOT a document (isDocument=false). Only official identity or financial documents count as documents. Classify documentType as exactly one of: AADHAAR, PAN, PASSPORT, DRIVING_LICENSE, VOTER_ID, BANK_STATEMENT, UTILITY_BILL, ADDRESS_PROOF, GST_CERTIFICATE, BUSINESS_REGISTRATION, PHOTOGRAPH, UNKNOWN. A plain person photo or selfie => documentType \"PHOTOGRAPH\" and isDocument=false. Decide using visual structure, layout, document terminology, field patterns and OCR evidence together - never a single keyword. Set quality between 0 and 1 (blurry, cropped or low-resolution => low quality). Perform OCR of all visible text into rawText. If you are not confident, use documentType \"UNKNOWN\" with a low confidence. Never invent text that is not visible. CRITICAL: Return ONLY a raw minified JSON object. Do NOT wrap in markdown code fences. Do NOT use backticks. Do NOT write ```json or ```. Output must start with { and end with }. Keys: isDocument (boolean), documentType (string), confidence (number 0-1), quality (number 0-1), reason (string), signals (array of strings), rawText (string).",
+        "inputType": "binary",
+        "options": {
+          "maxOutputTokens": 4096
+        }
+      },
+      "id": "9832577d-50bb-4a36-9262-fd38118c938a",
+      "name": "Analyze Document (Vision)",
+      "type": "@n8n/n8n-nodes-langchain.googleGemini",
+      "typeVersion": 1.2,
+      "position": [
+        -1344,
+        272
+      ],
+      "retryOnFail": true,
+      "maxTries": 4,
+      "waitBetweenTries": 60000,
+      "credentials": {
+        "googlePalmApi": {
+          "id": "KjsC7pX6r6XMKHBD",
+          "name": "DocSure_Gemini_Paid"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "var raw = $json || {};\n// Extract text from ALL known Gemini + OpenAI response shapes\nvar text = '';\nif (typeof raw.text === 'string') text = raw.text; // Gemini image/analyze simplified\nelse if (raw.content && raw.content.parts && Array.isArray(raw.content.parts) && raw.content.parts[0]) text = (raw.content.parts[0].text || '').toString(); // Gemini text/message simplified\nelse if (typeof raw.content === 'string') text = raw.content;\nelse if (Array.isArray(raw.content) && raw.content[0] && raw.content[0].text) text = raw.content[0].text;\nelse if (raw.output && raw.output[0] && raw.output[0].content && raw.output[0].content[0] && raw.output[0].content[0].text) text = raw.output[0].content[0].text;\nelse if (raw.message && typeof raw.message.content === 'string') text = raw.message.content;\nelse text = JSON.stringify(raw);\n// Strip markdown code fences (```json ... ``` or ``` ... ```)\ntext = text.replace(/^```(?:json)?\\s*/i, '').replace(/\\s*```\\s*$/i, '').trim();\nvar parsed = null;\ntry { parsed = JSON.parse(text); } catch(e) { var m = text.match(/\\{[\\s\\S]*\\}/); if (m) { try { parsed = JSON.parse(m[0]); } catch(e2) { parsed = null; } } }\nvar a = parsed || {};\nvar c = $('Validate File').first().json;\nvar documentType = (a.documentType || 'UNKNOWN').toString().toUpperCase().trim();\nvar confidence = typeof a.confidence === 'number' ? a.confidence : 0;\nvar quality = typeof a.quality === 'number' ? a.quality : (typeof a.qualityScore === 'number' ? a.qualityScore : 0);\nvar isDocument = a.isDocument === true;\nvar rawText = (a.rawText || a.raw_text || '').toString();\nvar reason = (a.reason || '').toString();\nvar signals = Array.isArray(a.signals) ? a.signals : [];\nvar isAcceptable = isDocument || (c.expectedDocumentType === 'PHOTOGRAPH' && documentType === 'PHOTOGRAPH');\nreturn [{ json: Object.assign({}, c, { isDocument:isDocument, isAcceptable:isAcceptable, documentType:documentType, confidence:confidence, quality:quality, rawText:rawText, reason:reason, signals:signals, analysisOk:parsed !== null }) }];"
+      },
+      "id": "7cdd95cd-14dd-47d8-bdf4-3840bd83d0b5",
+      "name": "Parse Vision Analysis",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1120,
+        272
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "present",
+              "leftValue": "={{ $json.isAcceptable }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "a4591b2a-b2bc-4e46-bb55-e54d29878e33",
+      "name": "Document Detected?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -896,
+        624
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "quality",
+              "leftValue": "={{ $json.quality }}",
+              "rightValue": 0.5,
+              "operator": {
+                "type": "number",
+                "operation": "gte"
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "4b630ab0-61e1-48a3-adab-2a9ee84c4824",
+      "name": "Quality OK?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -672,
+        528
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "conf",
+              "leftValue": "={{ $json.confidence }}",
+              "rightValue": 0.6,
+              "operator": {
+                "type": "number",
+                "operation": "gte"
+              }
+            },
+            {
+              "id": "known",
+              "leftValue": "={{ $json.documentType }}",
+              "rightValue": "UNKNOWN",
+              "operator": {
+                "type": "string",
+                "operation": "notEquals"
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "32d28488-3db4-4b05-b296-43fdc4e43408",
+      "name": "Confidence OK?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -448,
+        432
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "var j = $json;\nvar expected = (j.expectedDocumentType || '').toString().toUpperCase().trim();\nvar detected = (j.documentType || 'UNKNOWN').toString().toUpperCase().trim();\nvar typeMatch = !expected || expected === detected;\nreturn [{ json: Object.assign({}, j, { expected:expected, detected:detected, typeMatch:typeMatch }) }];"
+      },
+      "id": "c2bd5cf7-d195-4a73-adb2-ee605170604c",
+      "name": "Expected Type Check",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -224,
+        336
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "match",
+              "leftValue": "={{ $json.typeMatch }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "c351e5e8-d20f-4add-90e8-6f9be2800059",
+      "name": "Type Matches Expected?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        0,
+        336
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "rowNotExists",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "t7ZDktP0rV7BGFLP",
+          "cachedResultName": "docsure_documents"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "application_id",
+              "keyValue": "={{ $json.applicationId }}"
+            },
+            {
+              "keyName": "detected_document_type",
+              "keyValue": "={{ $json.detected }}"
+            }
+          ]
+        }
+      },
+      "id": "afb9519d-f4d4-4461-a565-c758c5161478",
+      "name": "Not Duplicate By Doc Type",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        224,
+        1680
+      ]
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "models/gemini-3.6-flash",
+          "cachedResultName": "Gemini 3.6 Flash"
+        },
+        "messages": {
+          "values": [
+            {
+              "content": "=Document type: {{ $json.detected }}\nOCR / document text:\n{{ $json.rawText }}"
+            }
+          ]
+        },
+        "builtInTools": {},
+        "options": {
+          "systemMessage": "You are a precise document field extractor for Indian KYC documents. Extract ONLY fields that are VISIBLY PRESENT in the document image or OCR text. NEVER fabricate, guess, or infer values not present.\n\nFor AADHAAR card extract:\n- name: Full name printed on card (usually large text, may be in English and Hindi)\n- dob: Date of birth in DD/MM/YYYY format\n- gender: MALE or FEMALE\n- documentNumber: 12-digit Aadhaar number (format: XXXX XXXX XXXX)\n- address: Complete address as printed\n\nFor PAN card extract:\n- name: Name printed below photo (English text)\n- fatherName: Father name printed on card\n- dob: Date of birth in DD/MM/YYYY format\n- documentNumber: 10-character PAN (format: ABCDE1234F)\n\nFor PASSPORT extract:\n- name: Surname + Given name\n- documentNumber: Passport number\n- dob: Date of birth\n- expiry: Date of expiry\n- gender: M or F\n\nFor DRIVING_LICENSE extract:\n- name: Name on license\n- documentNumber: DL number\n- dob: Date of birth\n- address: Address\n- expiry: Validity date\n\nFor each field return: {\"value\": <extracted_value_or_null>, \"confidence\": <0.0-1.0>, \"source\": \"visible_text\" or \"not_detected\"}\nIf field not present: {\"value\": null, \"confidence\": 0, \"source\": \"not_detected\"}\n\nAlso extract registrationNumber and gstin if present (for GST/business docs), otherwise null.\n\nCRITICAL: Return ONLY a raw minified JSON object of the form {\"fields\":{\"name\":{...},\"dob\":{...},\"address\":{...},\"documentNumber\":{...},\"expiry\":{...},\"gender\":{...},\"fatherName\":{...},\"registrationNumber\":{...},\"gstin\":{...}}}. Do NOT wrap in markdown code fences. Do NOT use backticks. Output must start with { and end with }.",
+          "maxOutputTokens": 4096,
+          "temperature": 0
+        }
+      },
+      "id": "c0c2cb8e-cedf-4cd5-b274-79a410e24324",
+      "name": "Extract Fields (AI)",
+      "type": "@n8n/n8n-nodes-langchain.googleGemini",
+      "typeVersion": 1.2,
+      "position": [
+        224,
+        288
+      ],
+      "retryOnFail": true,
+      "maxTries": 4,
+      "waitBetweenTries": 60000,
+      "credentials": {
+        "googlePalmApi": {
+          "id": "KjsC7pX6r6XMKHBD",
+          "name": "DocSure_Gemini_Paid"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "var ctx = $('Expected Type Check').first().json;\nvar raw = $json || {};\nvar text = '';\nif (typeof raw.text === 'string') text = raw.text;\nelse if (raw.content && raw.content.parts && Array.isArray(raw.content.parts) && raw.content.parts[0]) text = (raw.content.parts[0].text || '').toString();\nelse if (typeof raw.content === 'string') text = raw.content;\nelse if (Array.isArray(raw.content) && raw.content[0] && raw.content[0].text) text = raw.content[0].text;\nelse if (raw.output && raw.output[0] && raw.output[0].content && raw.output[0].content[0] && raw.output[0].content[0].text) text = raw.output[0].content[0].text;\nelse if (raw.message && typeof raw.message.content === 'string') text = raw.message.content;\nelse text = JSON.stringify(raw);\ntext = text.replace(/^```(?:json)?\\s*/i, '').replace(/\\s*```\\s*$/i, '').trim();\nvar parsed = null;\ntry { parsed = JSON.parse(text); } catch(e) { var m = text.match(/\\{[\\s\\S]*\\}/); if (m) { try { parsed = JSON.parse(m[0]); } catch(e2) { parsed = null; } } }\nvar fields = (parsed && (parsed.fields || parsed)) || {};\nfunction normField(v) {\n  if (v && typeof v === 'object' && ('value' in v)) { var val = (v.value === undefined || v.value === '') ? null : v.value; return { value:val, confidence:typeof v.confidence === 'number' ? v.confidence : (val ? 0.8 : 0), source:v.source || (val ? 'visible_text' : 'not_detected') }; }\n  if (v === undefined || v === null || v === '') return { value:null, confidence:0, source:'not_detected' };\n  return { value:v, confidence:0.8, source:'visible_text' };\n}\nvar keys = ['name','dob','address','documentNumber','expiry','gender','fatherName','registrationNumber','gstin'];\nvar norm = {};\nkeys.forEach(function(k) { norm[k] = normField(fields[k]); });\nvar RULES = { PAN:{ number:/^[A-Z]{5}[0-9]{4}[A-Z]$/, numberField:'documentNumber', required:['name','documentNumber'] }, AADHAAR:{ number:/^[2-9][0-9]{11}$/, numberField:'documentNumber', required:['name','documentNumber','dob'], multiSignal:true }, PASSPORT:{ number:/^[A-PR-WY][0-9]{7}$/, numberField:'documentNumber', required:['name','documentNumber','expiry'] }, DRIVING_LICENSE:{ required:['name','documentNumber'] }, VOTER_ID:{ number:/^[A-Z]{3}[0-9]{7}$/, numberField:'documentNumber', required:['name','documentNumber'] }, GST_CERTIFICATE:{ number:/^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][0-9A-Z]Z[0-9A-Z]$/, numberField:'gstin', required:['gstin'] }, UTILITY_BILL:{ required:['address'] }, ADDRESS_PROOF:{ required:['address'] }, BANK_STATEMENT:{ required:['name'] }, BUSINESS_REGISTRATION:{ required:['registrationNumber'] } };\nvar detected = ctx.detected;\nvar rule = RULES[detected] || { required:[] };\nvar issues = [];\nvar rulesApplied = [];\nvar formatValid = true;\nif (rule.number) { var nf = rule.numberField || 'documentNumber'; var rawNum = (norm[nf] && norm[nf].value) ? norm[nf].value.toString().replace(/\\s+/g,'').toUpperCase() : ''; rulesApplied.push(detected+'_FORMAT'); if (!rawNum) { formatValid=false; issues.push('MISSING_'+nf.toUpperCase()); } else if (!rule.number.test(rawNum)) { formatValid=false; issues.push('INVALID_'+detected+'_NUMBER_FORMAT'); } }\n(rule.required || []).forEach(function(rf) { if (!norm[rf] || norm[rf].value === null) { var code = 'MISSING_'+rf.toUpperCase(); if (issues.indexOf(code)===-1) issues.push(code); } });\nvar expired = false;\nif (norm.expiry && norm.expiry.value) { var d = new Date(norm.expiry.value); if (!isNaN(d.getTime()) && d.getTime() < Date.now()) { expired=true; issues.push('DOCUMENT_EXPIRED'); } }\nif (rule.multiSignal) { var hay = ((ctx.signals||[]).join(' ')+' '+(ctx.rawText||'')).toLowerCase(); var s = 0; if (/[2-9]\\d{3}\\s?\\d{4}\\s?\\d{4}/.test(ctx.rawText||'')) s++; if (hay.indexOf('government of india')>-1||hay.indexOf('uidai')>-1) s++; if (hay.indexOf('aadhaar')>-1||hay.indexOf('aadhar')>-1) s++; if (norm.dob&&norm.dob.value) s++; rulesApplied.push('AADHAAR_MULTISIGNAL'); if (s<2) issues.push('WEAK_AADHAAR_SIGNALS'); }\nvar validationResult = { status:issues.length?'ISSUES_FOUND':'PASSED', formatValid:formatValid, expired:expired, rulesApplied:rulesApplied, issues:issues };\nreturn [{ json: Object.assign({}, ctx, { fieldsNorm:norm, formatValid:formatValid, expired:expired, issuesArr:issues, issues:JSON.stringify(issues), extracted_fields:JSON.stringify(norm), validation_result:JSON.stringify(validationResult), extractionOk:parsed!==null }) }];"
+      },
+      "id": "c9b43bab-ee46-46a4-a4c0-3e051cc50bc5",
+      "name": "Validate Fields",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        448,
+        768
+      ]
+    },
+    {
+      "parameters": {
+        "dataTableId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "t7ZDktP0rV7BGFLP",
+          "cachedResultName": "docsure_documents"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "schema": [
+            {
+              "id": "request_id",
+              "displayName": "request_id",
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "display": true,
+              "required": false
+            },
+            {
+              "id": "application_id",
+              "displayName": "application_id",
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "display": true,
+              "required": false
+            },
+            {
+              "id": "document_id",
+              "displayName": "document_id",
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "display": true,
+              "required": false
+            },
+            {
+              "id": "expected_document_type",
+              "displayName": "expected_document_type",
+              "type": "string",
+              "display": true,
+              "required": false
+            },
+            {
+              "id": "detected_document_type",
+              "displayName": "detected_document_type",
+              "type": "string",
+              "display": true,
+              "required": false
+            },
+            {
+              "id": "is_document",
+              "displayName": "is_document",
+              "type": "boolean",
+              "display": true,
+              "required": false
+            },
+            {
+              "id": "detection_confidence",
+              "displayName": "detection_confidence",
+              "type": "number",
+              "display": true,
+              "required": false
+            },
+            {
+              "id": "classification_confidence",
+              "displayName": "classification_confidence",
+              "type": "number",
+              "display": true,
+              "required": false
+            },
+            {
+              "id": "quality_score",
+              "displayName": "quality_score",
+              "type": "number",
+              "display": true,
+              "required": false
+            },
+            {
+              "id": "file_hash",
+              "displayName": "file_hash",
+              "type": "string",
+              "display": true,
+              "required": false
+            },
+            {
+              "id": "file_name",
+              "displayName": "file_name",
+              "type": "string",
+              "display": true,
+              "required": false
+            },
+            {
+              "id": "mime_type",
+              "displayName": "mime_type",
+              "type": "string",
+              "display": true,
+              "required": false
+            },
+            {
+              "id": "raw_text",
+              "displayName": "raw_text",
+              "type": "string",
+              "display": true,
+              "required": false
+            },
+            {
+              "id": "extracted_fields",
+              "displayName": "extracted_fields",
+              "type": "string",
+              "display": true,
+              "required": false
+            },
+            {
+              "id": "validation_result",
+              "displayName": "validation_result",
+              "type": "string",
+              "display": true,
+              "required": false
+            },
+            {
+              "id": "issues",
+              "displayName": "issues",
+              "type": "string",
+              "display": true,
+              "required": false
+            },
+            {
+              "id": "status",
+              "displayName": "status",
+              "type": "string",
+              "display": true,
+              "required": false
+            },
+            {
+              "id": "readiness_score",
+              "displayName": "readiness_score",
+              "type": "number",
+              "display": true,
+              "required": false
+            },
+            {
+              "id": "attention_score",
+              "displayName": "attention_score",
+              "type": "number",
+              "display": true,
+              "required": false
+            },
+            {
+              "id": "created_at",
+              "displayName": "created_at",
+              "type": "string",
+              "display": true,
+              "required": false
+            },
+            {
+              "id": "updated_at",
+              "displayName": "updated_at",
+              "type": "string",
+              "display": true,
+              "required": false
+            }
+          ],
+          "value": {
+            "request_id": "={{ $json.requestId }}",
+            "application_id": "={{ $json.applicationId }}",
+            "document_id": "={{ $json.documentId }}",
+            "expected_document_type": "={{ $json.expected }}",
+            "detected_document_type": "={{ $json.detected }}",
+            "is_document": "={{ $json.isDocument }}",
+            "detection_confidence": "={{ $json.confidence }}",
+            "classification_confidence": "={{ $json.confidence }}",
+            "quality_score": "={{ $json.quality }}",
+            "file_hash": "={{ $json.fileHash }}",
+            "file_name": "={{ $json.fileName }}",
+            "mime_type": "={{ $json.mimeType }}",
+            "raw_text": "={{ $json.rawText }}",
+            "extracted_fields": "={{ $json.extracted_fields }}",
+            "validation_result": "={{ $json.validation_result }}",
+            "issues": "={{ $json.issues }}",
+            "status": "PROCESSING",
+            "readiness_score": 0,
+            "attention_score": 0,
+            "created_at": "={{ $now.toISO() }}",
+            "updated_at": "={{ $now.toISO() }}"
+          }
+        },
+        "options": {}
+      },
+      "id": "4a3ee152-44ff-40a6-84f8-16c9aa772b60",
+      "name": "Save Analysis",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        672,
+        768
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "t7ZDktP0rV7BGFLP",
+          "cachedResultName": "docsure_documents"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "application_id",
+              "keyValue": "={{ $('Validate File').first().json.applicationId }}"
+            }
+          ]
+        },
+        "returnAll": true
+      },
+      "id": "7970903c-c99e-4f82-8b35-0c7805ba6daa",
+      "name": "Fetch Application Documents",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        896,
+        768
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "var rows = $input.all().filter(function(i) { return i.json && i.json.document_id; });\nvar cur = $('Validate Fields').first().json;\nvar curName = (cur.fieldsNorm && cur.fieldsNorm.name && cur.fieldsNorm.name.value) ? cur.fieldsNorm.name.value.toString() : '';\nfunction nm(s) { return (s||'').toString().toLowerCase().replace(/[^a-z0-9]+/g,' ').trim(); }\nvar others = [];\nrows.forEach(function(r) { if (r.json.document_id === cur.documentId) return; var ef = {}; try { ef = JSON.parse(r.json.extracted_fields||'{}'); } catch(e) { ef = {}; } var n = (ef.name && ef.name.value) ? ef.name.value : null; others.push({ documentId:r.json.document_id, type:r.json.detected_document_type, name:n }); });\nvar named = others.filter(function(o) { return o.name; });\nvar crossName = 'NOT_ENOUGH_DATA';\nif (curName && named.length) { var allMatch = named.every(function(o) { return nm(o.name)===nm(curName); }); crossName = allMatch ? 'MATCH' : 'MISMATCH'; }\nvar cross = { name:crossName, comparedWith:others };\nreturn [{ json: Object.assign({}, cur, { cross:cross, crossName:crossName }) }];"
+      },
+      "id": "7ee5a098-fb2a-48cf-8f07-03f5cad08d4e",
+      "name": "Cross-Document Intelligence",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        768
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "var j = $json;\nvar issues = [];\ntry { issues = JSON.parse(j.issues||'[]'); } catch(e) { issues = j.issuesArr||[]; }\nvar conf = typeof j.confidence === 'number' ? j.confidence : 0;\nvar readiness = 100;\nif (!j.formatValid) readiness -= 30;\nif (j.expired) readiness -= 25;\nreadiness -= Math.min(40, issues.length * 10);\nreadiness -= Math.round((1 - conf) * 20);\nif (readiness < 0) readiness = 0;\nif (readiness > 100) readiness = 100;\nvar attention = 0;\nif (!j.formatValid) attention += 30;\nif (j.expired) attention += 25;\nattention += issues.length * 10;\nif (j.crossName === 'MISMATCH') attention += 30;\nif (conf < 0.75) attention += 15;\nif (attention > 100) attention = 100;\nvar reviewRequired = attention >= 40 || j.crossName === 'MISMATCH' || conf < 0.7 || !j.formatValid || j.expired;\nvar status = reviewRequired ? 'REVIEW_REQUIRED' : 'VERIFIED';\nvar now = new Date().toISOString();\nvar apiResponse = { success:true, requestId:j.requestId, applicationId:j.applicationId, documentId:j.documentId, status:status, message:status==='VERIFIED'?'Document verified successfully.':'Document processed and flagged for manual review.', data:{ documentType:j.detected, fields:j.fieldsNorm, crossDocument:j.cross, readinessScore:readiness, attentionScore:attention }, issues:issues, confidence:conf, timestamp:now };\nreturn [{ json: Object.assign({}, j, { readinessScore:readiness, attentionScore:attention, finalStatus:status, reviewRequired:reviewRequired, apiResponse:apiResponse, decidedAt:now }) }];"
+      },
+      "id": "1ffcfa75-1827-4357-a005-ea386081ac4d",
+      "name": "Compute Decision",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1344,
+        768
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "t7ZDktP0rV7BGFLP",
+          "cachedResultName": "docsure_documents"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "document_id",
+              "keyValue": "={{ $json.documentId }}"
+            },
+            {
+              "keyName": "request_id",
+              "keyValue": "={{ $json.requestId }}"
+            }
+          ]
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "schema": [
+            {
+              "id": "status",
+              "displayName": "status",
+              "type": "string",
+              "display": true,
+              "required": false
+            },
+            {
+              "id": "readiness_score",
+              "displayName": "readiness_score",
+              "type": "number",
+              "display": true,
+              "required": false
+            },
+            {
+              "id": "attention_score",
+              "displayName": "attention_score",
+              "type": "number",
+              "display": true,
+              "required": false
+            },
+            {
+              "id": "issues",
+              "displayName": "issues",
+              "type": "string",
+              "display": true,
+              "required": false
+            },
+            {
+              "id": "validation_result",
+              "displayName": "validation_result",
+              "type": "string",
+              "display": true,
+              "required": false
+            },
+            {
+              "id": "updated_at",
+              "displayName": "updated_at",
+              "type": "string",
+              "display": true,
+              "required": false
+            }
+          ],
+          "value": {
+            "status": "={{ $json.finalStatus }}",
+            "readiness_score": "={{ $json.readinessScore }}",
+            "attention_score": "={{ $json.attentionScore }}",
+            "issues": "={{ $json.issues }}",
+            "validation_result": "={{ $json.validation_result }}",
+            "updated_at": "={{ $now.toISO() }}"
+          }
+        },
+        "options": {}
+      },
+      "id": "07a5bc6a-9f16-4951-97b7-0fdf2cba4af0",
+      "name": "Update Record",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        1568,
+        768
+      ]
+    },
+    {
+      "parameters": {
+        "dataTableId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "QiZ0L8kmK1xvdAcl",
+          "cachedResultName": "docsure_audit_log"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "schema": [
+            {
+              "id": "event_id",
+              "displayName": "event_id",
+              "type": "string",
+              "display": true,
+              "required": false
+            },
+            {
+              "id": "event_type",
+              "displayName": "event_type",
+              "type": "string",
+              "display": true,
+              "required": false
+            },
+            {
+              "id": "severity",
+              "displayName": "severity",
+              "type": "string",
+              "display": true,
+              "required": false
+            },
+            {
+              "id": "request_id",
+              "displayName": "request_id",
+              "type": "string",
+              "display": true,
+              "required": false
+            },
+            {
+              "id": "application_id",
+              "displayName": "application_id",
+              "type": "string",
+              "display": true,
+              "required": false
+            },
+            {
+              "id": "document_id",
+              "displayName": "document_id",
+              "type": "string",
+              "display": true,
+              "required": false
+            },
+            {
+              "id": "details",
+              "displayName": "details",
+              "type": "string",
+              "display": true,
+              "required": false
+            },
+            {
+              "id": "created_at",
+              "displayName": "created_at",
+              "type": "string",
+              "display": true,
+              "required": false
+            }
+          ],
+          "value": {
+            "event_id": "={{ 'EV-' + $('Compute Decision').first().json.requestId }}",
+            "event_type": "DOCUMENT_PROCESSED",
+            "severity": "={{ $('Compute Decision').first().json.finalStatus === 'VERIFIED' ? 'INFO' : 'WARN' }}",
+            "request_id": "={{ $('Compute Decision').first().json.requestId }}",
+            "application_id": "={{ $('Compute Decision').first().json.applicationId }}",
+            "document_id": "={{ $('Compute Decision').first().json.documentId }}",
+            "details": "={{ JSON.stringify($('Compute Decision').first().json.apiResponse) }}",
+            "created_at": "={{ $now.toISO() }}"
+          }
+        },
+        "options": {}
+      },
+      "id": "9ccf5e6b-7ba2-443c-ae53-64b1115c74a6",
+      "name": "Write Audit Log",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        1792,
+        768
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "review",
+              "leftValue": "={{ $('Compute Decision').first().json.reviewRequired }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "613f470c-209e-49d3-a471-1a835382a115",
+      "name": "Needs Human Review?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        2016,
+        768
+      ]
+    },
+    {
+      "parameters": {
+        "dataTableId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "y7dR6vF83y25Xf9d",
+          "cachedResultName": "docsure_review_queue"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "schema": [
+            {
+              "id": "review_id",
+              "displayName": "review_id",
+              "type": "string",
+              "display": true,
+              "required": false
+            },
+            {
+              "id": "application_id",
+              "displayName": "application_id",
+              "type": "string",
+              "display": true,
+              "required": false
+            },
+            {
+              "id": "document_id",
+              "displayName": "document_id",
+              "type": "string",
+              "display": true,
+              "required": false
+            },
+            {
+              "id": "issue_type",
+              "displayName": "issue_type",
+              "type": "string",
+              "display": true,
+              "required": false
+            },
+            {
+              "id": "reason",
+              "displayName": "reason",
+              "type": "string",
+              "display": true,
+              "required": false
+            },
+            {
+              "id": "severity",
+              "displayName": "severity",
+              "type": "string",
+              "display": true,
+              "required": false
+            },
+            {
+              "id": "confidence",
+              "displayName": "confidence",
+              "type": "number",
+              "display": true,
+              "required": false
+            },
+            {
+              "id": "status",
+              "displayName": "status",
+              "type": "string",
+              "display": true,
+              "required": false
+            },
+            {
+              "id": "created_at",
+              "displayName": "created_at",
+              "type": "string",
+              "display": true,
+              "required": false
+            },
+            {
+              "id": "updated_at",
+              "displayName": "updated_at",
+              "type": "string",
+              "display": true,
+              "required": false
+            }
+          ],
+          "value": {
+            "review_id": "={{ 'RV-' + $('Compute Decision').first().json.requestId }}",
+            "application_id": "={{ $('Compute Decision').first().json.applicationId }}",
+            "document_id": "={{ $('Compute Decision').first().json.documentId }}",
+            "issue_type": "={{ $('Compute Decision').first().json.crossName === 'MISMATCH' ? 'CROSS_DOC_MISMATCH' : 'VALIDATION' }}",
+            "reason": "={{ $('Compute Decision').first().json.apiResponse.message }}",
+            "severity": "={{ $('Compute Decision').first().json.attentionScore >= 60 ? 'HIGH' : 'MEDIUM' }}",
+            "confidence": "={{ $('Compute Decision').first().json.confidence }}",
+            "status": "PENDING",
+            "created_at": "={{ $now.toISO() }}",
+            "updated_at": "={{ $now.toISO() }}"
+          }
+        },
+        "options": {}
+      },
+      "id": "23e1f2c6-0b91-4a49-af33-32cf1f426e78",
+      "name": "Add to Review Queue",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        2240,
+        768
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($('Compute Decision').first().json.apiResponse) }}",
+        "options": {}
+      },
+      "id": "4ef4cd94-96b7-490a-80d8-75fb8accbf59",
+      "name": "API Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        2464,
+        768
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "var j = $('Expected Type Check').first().json;\nvar now = new Date().toISOString();\nvar apiResponse = { success:false, requestId:j.requestId, applicationId:j.applicationId, documentId:j.documentId, status:'WRONG_DOCUMENT', expectedDocumentType:j.expected, detectedDocumentType:j.detected, message:'The uploaded document does not match the required document type.', action:'UPLOAD_CORRECT_DOCUMENT', data:{ expectedDocumentType:j.expected, detectedDocumentType:j.detected }, issues:['WRONG_DOCUMENT'], confidence:j.confidence||0, timestamp:now };\nreturn [{ json: { apiResponse:apiResponse, audit_event_type:'WRONG_DOCUMENT', audit_severity:'WARN', audit_details:'Expected '+j.expected+' got '+j.detected, requestId:j.requestId, applicationId:j.applicationId, documentId:j.documentId } }];"
+      },
+      "id": "3ae91a7c-802e-41d0-92ff-16c9ab9a38eb",
+      "name": "Build WRONG_DOCUMENT",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        224,
+        480
+      ]
+    },
+    {
+      "parameters": {
+        "dataTableId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "QiZ0L8kmK1xvdAcl",
+          "cachedResultName": "docsure_audit_log"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "schema": [
+            {
+              "id": "event_id",
+              "displayName": "event_id",
+              "type": "string",
+              "display": true,
+              "required": false
+            },
+            {
+              "id": "event_type",
+              "displayName": "event_type",
+              "type": "string",
+              "display": true,
+              "required": false
+            },
+            {
+              "id": "severity",
+              "displayName": "severity",
+              "type": "string",
+              "display": true,
+              "required": false
+            },
+            {
+              "id": "request_id",
+              "displayName": "request_id",
+              "type": "string",
+              "display": true,
+              "required": false
+            },
+            {
+              "id": "application_id",
+              "displayName": "application_id",
+              "type": "string",
+              "display": true,
+              "required": false
+            },
+            {
+              "id": "document_id",
+              "displayName": "document_id",
+              "type": "string",
+              "display": true,
+              "required": false
+            },
+            {
+              "id": "details",
+              "displayName": "details",
+              "type": "string",
+              "display": true,
+              "required": false
+            },
+            {
+              "id": "created_at",
+              "displayName": "created_at",
+              "type": "string",
+              "display": true,
+              "required": false
+            }
+          ],
+          "value": {
+            "event_id": "={{ 'EV-' + $json.requestId + '-' + Date.now() }}",
+            "event_type": "={{ $json.audit_event_type }}",
+            "severity": "={{ $json.audit_severity }}",
+            "request_id": "={{ $json.requestId }}",
+            "application_id": "={{ $json.applicationId }}",
+            "document_id": "={{ $json.documentId }}",
+            "details": "={{ $json.audit_details }}",
+            "created_at": "={{ $now.toISO() }}"
+          }
+        },
+        "options": {}
+      },
+      "id": "40ebbb30-4d61-4e2d-93b0-3528b97ddeb7",
+      "name": "Log Rejection",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        448,
+        384
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json.apiResponse) }}",
+        "options": {}
+      },
+      "id": "e99d02ef-cca1-4b6d-8e98-15bb5a7004ee",
+      "name": "API Response (Rejected)",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        448,
+        576
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "var j = $json;\nvar now = new Date().toISOString();\nvar apiResponse = { success:false, requestId:j.requestId, applicationId:j.applicationId, documentId:j.documentId, status:'UNSUPPORTED_DOCUMENT', message:'The document could not be classified with sufficient confidence.', data:{ detectedType:j.documentType, confidence:j.confidence, reason:j.reason }, issues:['UNKNOWN'], confidence:j.confidence||0, timestamp:now };\nreturn [{ json: { apiResponse:apiResponse, audit_event_type:'UNKNOWN_DOCUMENT', audit_severity:'WARN', audit_details:'Low confidence '+j.confidence, requestId:j.requestId, applicationId:j.applicationId, documentId:j.documentId } }];"
+      },
+      "id": "9a83ea50-9326-4990-aa0b-453a70bad118",
+      "name": "Build UNKNOWN",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        224,
+        672
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "var j = $json;\nvar now = new Date().toISOString();\nvar apiResponse = { success:false, requestId:j.requestId, applicationId:j.applicationId, documentId:j.documentId, status:'LOW_QUALITY', message:'The document image quality is too low to process. Please upload a clearer copy.', data:{ qualityScore:j.quality, detectedType:j.documentType }, issues:['LOW_QUALITY'], confidence:j.confidence||0, timestamp:now };\nreturn [{ json: { apiResponse:apiResponse, audit_event_type:'LOW_QUALITY', audit_severity:'WARN', audit_details:'Quality '+j.quality, requestId:j.requestId, applicationId:j.applicationId, documentId:j.documentId } }];"
+      },
+      "id": "57bb46f4-4a6f-47a2-a751-1ae6e969e3f0",
+      "name": "Build LOW_QUALITY",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        224,
+        864
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "var j = $json;\nvar now = new Date().toISOString();\nvar apiResponse = { success:false, requestId:j.requestId, applicationId:j.applicationId, documentId:j.documentId, status:'NO_DOCUMENT_DETECTED', message:'No document was detected in the uploaded file.', data:{ detectedType:j.documentType, reason:j.reason, signals:j.signals }, issues:['NO_DOCUMENT_DETECTED'], confidence:j.confidence||0, timestamp:now };\nreturn [{ json: { apiResponse:apiResponse, audit_event_type:'NO_DOCUMENT_DETECTED', audit_severity:'WARN', audit_details:j.reason||'No document detected', requestId:j.requestId, applicationId:j.applicationId, documentId:j.documentId } }];"
+      },
+      "id": "4718a543-7d00-40c1-97b7-8b2a43346a50",
+      "name": "Build NO_DOCUMENT_DETECTED",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        224,
+        1104
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "document",
+        "modelId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "models/gemini-3.6-flash",
+          "cachedResultName": "Gemini 3.6 Flash"
+        },
+        "text": "You are a strict KYC document detector and classifier for Indian identity and financial documents. This PDF may be text-based or a scanned image-based document. Do NOT assume every PDF is a valid identity document. Classify documentType as exactly one of: AADHAAR, PAN, PASSPORT, DRIVING_LICENSE, VOTER_ID, BANK_STATEMENT, UTILITY_BILL, ADDRESS_PROOF, GST_CERTIFICATE, BUSINESS_REGISTRATION, PHOTOGRAPH, UNKNOWN. Decide using visual structure, layout, document terminology, field patterns and OCR evidence together - never a single keyword. Set quality between 0 and 1 (blurry, cropped, or insufficient content => low quality). Perform OCR of ALL visible text into rawText including all numbers, names, dates and codes. If you are not confident, use documentType \"UNKNOWN\" with a low confidence. Never invent text that is not visible. CRITICAL: Return ONLY a raw minified JSON object. Do NOT wrap in markdown code fences. Do NOT use backticks. Do NOT write ```json or ```. Output must start with { and end with }. Keys: isDocument (boolean), documentType (string), confidence (number 0-1), quality (number 0-1), reason (string), signals (array of strings), rawText (string).",
+        "inputType": "binary",
+        "options": {
+          "maxOutputTokens": 8192
+        }
+      },
+      "id": "fe140820-26d0-42cc-aa85-4c4fa0bd16c1",
+      "name": "Analyze Document (PDF)",
+      "type": "@n8n/n8n-nodes-langchain.googleGemini",
+      "typeVersion": 1.2,
+      "position": [
+        -1344,
+        464
+      ],
+      "retryOnFail": true,
+      "maxTries": 4,
+      "waitBetweenTries": 60000,
+      "credentials": {
+        "googlePalmApi": {
+          "id": "KjsC7pX6r6XMKHBD",
+          "name": "DocSure_Gemini_Paid"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "var raw = $json || {};\nvar text = '';\nif (typeof raw.text === 'string') text = raw.text;\nelse if (raw.content && raw.content.parts && Array.isArray(raw.content.parts) && raw.content.parts[0]) text = (raw.content.parts[0].text || '').toString();\nelse if (typeof raw.content === 'string') text = raw.content;\nelse if (Array.isArray(raw.content) && raw.content[0] && raw.content[0].text) text = raw.content[0].text;\nelse if (raw.output && raw.output[0] && raw.output[0].content && raw.output[0].content[0] && raw.output[0].content[0].text) text = raw.output[0].content[0].text;\nelse if (raw.message && typeof raw.message.content === 'string') text = raw.message.content;\nelse text = JSON.stringify(raw);\ntext = text.replace(/^```(?:json)?\\s*/i, '').replace(/\\s*```\\s*$/i, '').trim();\nvar parsed = null;\ntry { parsed = JSON.parse(text); } catch(e) { var m = text.match(/\\{[\\s\\S]*\\}/); if (m) { try { parsed = JSON.parse(m[0]); } catch(e2) { parsed = null; } } }\nvar a = parsed || {};\nvar c = $('Validate File').first().json;\nvar documentType = (a.documentType || 'UNKNOWN').toString().toUpperCase().trim();\nvar confidence = typeof a.confidence === 'number' ? a.confidence : 0;\nvar quality = typeof a.quality === 'number' ? a.quality : (typeof a.qualityScore === 'number' ? a.qualityScore : 0);\nvar isDocument = a.isDocument === true;\nvar rawText = (a.rawText || a.raw_text || '').toString();\nvar reason = (a.reason || '').toString();\nvar signals = Array.isArray(a.signals) ? a.signals : [];\nvar isAcceptable = isDocument || (c.expectedDocumentType === 'PHOTOGRAPH' && documentType === 'PHOTOGRAPH');\nreturn [{ json: Object.assign({}, c, { isDocument:isDocument, isAcceptable:isAcceptable, documentType:documentType, confidence:confidence, quality:quality, rawText:rawText, reason:reason, signals:signals, analysisOk:parsed !== null }) }];"
+      },
+      "id": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
+      "name": "Parse PDF Analysis",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1120,
+        464
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": false,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 1
+                },
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.fileSubKind }}",
+                    "rightValue": "rtf",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ]
+              },
+              "renameOutput": true,
+              "outputKey": "rtf"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": false,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 1
+                },
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.fileSubKind }}",
+                    "rightValue": "txt",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ]
+              },
+              "renameOutput": true,
+              "outputKey": "txt"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra",
+          "renameFallbackOutput": "docx_doc"
+        }
+      },
+      "id": "27d7dc73-eaa8-474b-97ff-9ca0ae2c6433",
+      "name": "Office Format Sub-Router",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.4,
+      "position": [
+        -2016,
+        752
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "rtf",
+        "options": {}
+      },
+      "id": "d84f6e5f-8735-4c46-a6c3-d3c277a823c0",
+      "name": "Extract RTF Text",
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1.1,
+      "position": [
+        -1792,
+        528
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "var item   = $input.first();\nvar ingest = $(\"Validate File\").first().json;\nvar rawText = (item.json.text || \"\").toString().trim();\nreturn [{\n  json: {\n    requestId:            ingest.requestId,\n    applicationId:        ingest.applicationId,\n    documentId:           ingest.documentId,\n    expectedDocumentType: ingest.expectedDocumentType,\n    fileId:               ingest.fileId,\n    fileName:             ingest.fileName,\n    mimeType:             ingest.mimeType,\n    detectedMimeType:     ingest.detectedMimeType,\n    detectedExtension:    ingest.detectedExtension,\n    fileSize:             ingest.fileSize,\n    fileHash:             ingest.fileHash,\n    hashMethod:           ingest.hashMethod,\n    fileKind:             ingest.fileKind,\n    fileCategory:         ingest.fileCategory,\n    fileSubKind:          ingest.fileSubKind,\n    normalizedMeta:       ingest.normalizedMeta,\n    text:                 rawText,\n    officeTextOk:         rawText.length > 20,\n    limitedExtraction:    item.json.limitedExtraction || false,\n    extractionNote:       item.json.extractionNote    || \"\",\n  }\n}];"
+      },
+      "id": "fc31042f-6d57-4f0d-b4ef-7a1eb5b12e8c",
+      "name": "Normalize Office Text",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1568,
+        816
+      ]
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "models/gemini-3.6-flash",
+          "cachedResultName": "Gemini 3.6 Flash"
+        },
+        "messages": {
+          "values": [
+            {
+              "content": "=Extracted document text:\n{{ $json.text }}"
+            }
+          ]
+        },
+        "builtInTools": {},
+        "options": {
+          "systemMessage": "You are a strict document detector and classifier for Indian identity and financial documents based ONLY on extracted text. Classify documentType as exactly one of: AADHAAR, PAN, PASSPORT, DRIVING_LICENSE, VOTER_ID, BANK_STATEMENT, UTILITY_BILL, ADDRESS_PROOF, GST_CERTIFICATE, BUSINESS_REGISTRATION, PHOTOGRAPH, UNKNOWN. Use document terminology, field patterns and structure together - never a single keyword. If the text is generic or does not match a supported type, use \"UNKNOWN\" with low confidence. isDocument is true for real documents with structured content. Set quality 0-1 from how much readable structured text is present. Never invent text. CRITICAL: Return ONLY a raw minified JSON object. Do NOT wrap in markdown code fences. Do NOT use backticks. Do NOT write ```json or ```. Output must start with { and end with }. Keys: isDocument (boolean), documentType (string), confidence (number 0-1), quality (number 0-1), reason (string), signals (array of strings), rawText (string containing the source text).",
+          "maxOutputTokens": 8192,
+          "temperature": 0
+        }
+      },
+      "id": "d9e86cd7-7e48-41f5-9688-a0669bbd1ac3",
+      "name": "Analyze Document (Text)",
+      "type": "@n8n/n8n-nodes-langchain.googleGemini",
+      "typeVersion": 1.2,
+      "position": [
+        -1344,
+        1136
+      ],
+      "retryOnFail": true,
+      "maxTries": 4,
+      "waitBetweenTries": 60000,
+      "credentials": {
+        "googlePalmApi": {
+          "id": "KjsC7pX6r6XMKHBD",
+          "name": "DocSure_Gemini_Paid"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "var raw = $json || {};\nvar text = '';\nif (typeof raw.text === 'string') text = raw.text;\nelse if (raw.content && raw.content.parts && Array.isArray(raw.content.parts) && raw.content.parts[0]) text = (raw.content.parts[0].text || '').toString();\nelse if (typeof raw.content === 'string') text = raw.content;\nelse if (Array.isArray(raw.content) && raw.content[0] && raw.content[0].text) text = raw.content[0].text;\nelse if (raw.output && raw.output[0] && raw.output[0].content && raw.output[0].content[0] && raw.output[0].content[0].text) text = raw.output[0].content[0].text;\nelse if (raw.message && typeof raw.message.content === 'string') text = raw.message.content;\nelse text = JSON.stringify(raw);\ntext = text.replace(/^```(?:json)?\\s*/i, '').replace(/\\s*```\\s*$/i, '').trim();\nvar parsed = null;\ntry { parsed = JSON.parse(text); } catch(e) { var m = text.match(/\\{[\\s\\S]*\\}/); if (m) { try { parsed = JSON.parse(m[0]); } catch(e2) { parsed = null; } } }\nvar a = parsed || {};\nvar c = $('Validate File').first().json;\nvar documentType = (a.documentType || 'UNKNOWN').toString().toUpperCase().trim();\nvar confidence = typeof a.confidence === 'number' ? a.confidence : 0;\nvar quality = typeof a.quality === 'number' ? a.quality : 0.6;\nvar isDocument = a.isDocument === true;\nvar rawText = (a.rawText || a.raw_text || '').toString();\nvar reason = (a.reason || '').toString();\nvar signals = Array.isArray(a.signals) ? a.signals : [];\nvar isAcceptable = isDocument || (c.expectedDocumentType === 'PHOTOGRAPH' && documentType === 'PHOTOGRAPH');\nreturn [{ json: Object.assign({}, c, { isDocument:isDocument, isAcceptable:isAcceptable, documentType:documentType, confidence:confidence, quality:quality, rawText:rawText, reason:reason, signals:signals, analysisOk:parsed !== null }) }];"
+      },
+      "id": "5413384c-d8c7-4600-9f27-23ff5441135b",
+      "name": "Parse Text Analysis",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1120,
+        1136
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "text",
+        "options": {}
+      },
+      "id": "4698f573-016e-438a-9e05-b10676b5d78d",
+      "name": "Extract TXT Text",
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1.1,
+      "position": [
+        -1792,
+        864
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "var item = $input.first();\nvar ingest = $(\"Validate File\").first().json;\nvar extractedText = \"\";\nvar extractionNote = \"\";\ntry {\n  var binProp = (item.binary && item.binary.data) ? item.binary.data : null;\n  if (item.binary && binProp) {\n    var bin = binProp;\n    if (bin.data && typeof bin.data === \"string\" && bin.data.length > 0) {\n      var buf = Buffer.from(bin.data, \"base64\");\n      if (ingest.fileSubKind === \"docx\") {\n        var str = buf.toString(\"utf-8\");\n        var matches = str.match(/<w:t[^>]*>([^<]+)<\\/w:t>/g) || [];\n        var parts = matches\n          .map(function(m) { return m.replace(/<[^>]+>/g, \"\").trim(); })\n          .filter(function(t) { return t.length > 0; });\n        extractedText = parts.join(\" \");\n        extractionNote = \"docx_xml_extraction\";\n      } else {\n        var ascii = [];\n        var run = \"\";\n        var limit = Math.min(buf.length, 65536);\n        for (var i = 0; i < limit; i++) {\n          var c = buf[i];\n          if (c >= 32 && c <= 126) {\n            run += String.fromCharCode(c);\n          } else {\n            if (run.length >= 5) ascii.push(run.trim());\n            run = \"\";\n          }\n        }\n        if (run.length >= 5) ascii.push(run.trim());\n        extractedText = ascii\n          .filter(function(s) { return /[a-zA-Z]{3,}/.test(s); })\n          .join(\" \");\n        extractionNote = \"doc_ascii_scan\";\n      }\n    } else {\n      extractionNote = \"binary_not_inline\";\n    }\n  }\n} catch(e) {\n  extractionNote = \"extraction_error\";\n}\nvar text = extractedText.trim() ||\n  \"(Native text extraction is limited for this format. \" +\n   \"For best results convert to PDF or TXT before uploading.)\";\nreturn [{\n  json: {\n    text: text,\n    limitedExtraction: true,\n    extractionNote: extractionNote,\n  },\n  binary: item.binary,\n}];"
+      },
+      "id": "2dcb6236-055e-4423-9faf-e1eb2f1a6163",
+      "name": "DOCX/DOC Text Extract",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1792,
+        1216
+      ]
+    },
+    {
+      "parameters": {
+        "options": {
+          "headerRow": true,
+          "includeEmptyCells": false
+        }
+      },
+      "id": "c9494fc6-ccd6-41ca-aa80-5ff8f19164fb",
+      "name": "Extract Spreadsheet",
+      "type": "n8n-nodes-base.spreadsheetFile",
+      "typeVersion": 2,
+      "position": [
+        -1792,
+        1408
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "var rows   = $input.all().map(function(i) { return i.json; });\nvar ingest = $(\"Validate File\").first().json;\nvar headers = rows.length > 0 ? Object.keys(rows[0]) : [];\nvar lines = [headers.join(\"\\t\")];\nrows.slice(0, 200).forEach(function(r) {\n  lines.push(headers.map(function(h) {\n    var v = r[h];\n    return (v === null || v === undefined) ? \"\" : String(v);\n  }).join(\"\\t\"));\n});\nvar text = lines.join(\"\\n\");\nreturn [{\n  json: {\n    requestId:            ingest.requestId,\n    applicationId:        ingest.applicationId,\n    documentId:           ingest.documentId,\n    expectedDocumentType: ingest.expectedDocumentType,\n    fileId:               ingest.fileId,\n    fileName:             ingest.fileName,\n    mimeType:             ingest.mimeType,\n    detectedMimeType:     ingest.detectedMimeType,\n    detectedExtension:    ingest.detectedExtension,\n    fileSize:             ingest.fileSize,\n    fileHash:             ingest.fileHash,\n    hashMethod:           ingest.hashMethod,\n    fileKind:             ingest.fileKind,\n    fileCategory:         ingest.fileCategory,\n    fileSubKind:          ingest.fileSubKind,\n    normalizedMeta:       ingest.normalizedMeta,\n    text:                 text,\n    rowCount:             rows.length,\n    headers:              headers,\n    sampleRows:           rows.slice(0, 50),\n  }\n}];"
+      },
+      "id": "4fcea8f1-07e6-421c-a44b-f8d95339c98c",
+      "name": "Aggregate Spreadsheet Rows",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1568,
+        1248
+      ],
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "models/gemini-3.6-flash",
+          "cachedResultName": "Gemini 3.6 Flash"
+        },
+        "messages": {
+          "values": [
+            {
+              "content": "=Spreadsheet data ({{ $json.rowCount }} rows, headers: {{ $json.headers.join(\", \") }}):\n\n{{ $json.text }}"
+            }
+          ]
+        },
+        "builtInTools": {},
+        "options": {
+          "systemMessage": "You are a strict document classifier for structured spreadsheet data. Analyse the data and determine if it represents a supported financial or business document. IMPORTANT: Only classify as one of these if the structure clearly and unmistakably matches: BANK_STATEMENT (rows with date, description, debit/credit/amount, balance columns), GST_CERTIFICATE (GSTIN field present with taxpayer business details), BUSINESS_REGISTRATION (registration number, business name, incorporation date visible). NEVER classify any spreadsheet as AADHAAR, PAN, PASSPORT, DRIVING_LICENSE, VOTER_ID, PHOTOGRAPH, UTILITY_BILL or ADDRESS_PROOF — these cannot exist as spreadsheets. For all other cases set documentType to UNKNOWN, isDocument to false, and confidence below 0.3. Set quality 0-1 based on completeness and structure of the data. CRITICAL: Return ONLY a raw minified JSON object. Do NOT wrap in markdown code fences. Do NOT use backticks. Do NOT write ```json or ```. Output must start with { and end with }. Format: { \"isDocument\": boolean, \"documentType\": string, \"confidence\": number, \"quality\": number, \"reason\": string, \"signals\": [], \"rawText\": string }",
+          "maxOutputTokens": 4096,
+          "temperature": 0
+        }
+      },
+      "id": "3144671a-2e39-47c1-a05e-8bc4e5b485e1",
+      "name": "Analyze Document (Spreadsheet)",
+      "type": "@n8n/n8n-nodes-langchain.googleGemini",
+      "typeVersion": 1.2,
+      "position": [
+        -1344,
+        1248
+      ],
+      "retryOnFail": true,
+      "maxTries": 4,
+      "waitBetweenTries": 60000,
+      "credentials": {
+        "googlePalmApi": {
+          "id": "KjsC7pX6r6XMKHBD",
+          "name": "DocSure_Gemini_Paid"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "var raw = $json || {};\nvar text = \"\";\nif (typeof raw.text === \"string\") text = raw.text;\nelse if (raw.content && raw.content.parts && Array.isArray(raw.content.parts) && raw.content.parts[0]) text = (raw.content.parts[0].text || \"\").toString();\nelse if (typeof raw.content === \"string\") text = raw.content;\nelse if (Array.isArray(raw.content) && raw.content[0] && raw.content[0].text) text = raw.content[0].text;\nelse if (raw.output && raw.output[0] && raw.output[0].content && raw.output[0].content[0] && raw.output[0].content[0].text) text = raw.output[0].content[0].text;\nelse if (raw.message && typeof raw.message.content === \"string\") text = raw.message.content;\nelse text = JSON.stringify(raw);\ntext = text.replace(/^```(?:json)?\\s*/i, \"\").replace(/\\s*```\\s*$/i, \"\").trim();\nvar parsed = null;\ntry { parsed = JSON.parse(text); } catch(e) {\n  var m = text.match(/\\{[\\s\\S]*\\}/);\n  if (m) { try { parsed = JSON.parse(m[0]); } catch(e2) { parsed = null; } }\n}\nvar a = parsed || {};\nvar c = $(\"Validate File\").first().json;\nvar documentType = (a.documentType || \"UNKNOWN\").toString().toUpperCase().trim();\nvar confidence   = typeof a.confidence === \"number\" ? a.confidence : 0;\nvar quality      = typeof a.quality    === \"number\" ? a.quality    : 0;\nvar isDocument   = a.isDocument === true;\nvar rawText      = (a.rawText || a.raw_text || \"\").toString();\nvar reason       = (a.reason   || \"\").toString();\nvar signals      = Array.isArray(a.signals) ? a.signals : [];\nvar isAcceptable = isDocument || (c.expectedDocumentType === \"PHOTOGRAPH\" && documentType === \"PHOTOGRAPH\");\nreturn [{ json: Object.assign({}, c, {\n  isDocument:  isDocument,\n  isAcceptable: isAcceptable,\n  documentType: documentType,\n  confidence:  confidence,\n  quality:     quality,\n  rawText:     rawText,\n  reason:      reason,\n  signals:     signals,\n  analysisOk:  parsed !== null,\n}) }];"
+      },
+      "id": "0b7bcc0f-76e9-42d6-9980-f1a1c22e86c3",
+      "name": "Parse Spreadsheet Analysis",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1120,
+        1248
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "var c = $('Validate File').first().json;\nvar now = new Date().toISOString();\nvar apiResponse = {\n  success: false,\n  requestId: c.requestId,\n  applicationId: c.applicationId,\n  documentId: c.documentId,\n  status: 'UNSUPPORTED_FILE_FORMAT',\n  message: 'This file format is not supported.',\n  detectedMimeType: c.detectedMimeType || c.mimeType || 'unknown',\n  detectedExtension: c.detectedExtension || c.reportedExtension || 'unknown',\n  supportedFormats: c.supportedFormats || ['jpg','jpeg','png','webp','bmp','tiff','tif','heic','heif','pdf','doc','docx','rtf','txt','csv','xls','xlsx'],\n  issues: ['UNSUPPORTED_FILE_FORMAT'],\n  confidence: 0,\n  timestamp: now\n};\nreturn [{ json: {\n  apiResponse: apiResponse,\n  audit_event_type: 'UNSUPPORTED_FORMAT',\n  audit_severity: 'WARN',\n  audit_details: 'Unsupported mime ' + (c.detectedMimeType || c.mimeType) + ' ext ' + (c.detectedExtension || ''),\n  requestId: c.requestId,\n  applicationId: c.applicationId,\n  documentId: c.documentId,\n} }];"
+      },
+      "id": "bbaf8fdd-2717-4416-9816-82329b18e0c0",
+      "name": "Build UNSUPPORTED",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        224,
+        1296
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "var c = $('Validate File').first().json;\nvar now = new Date().toISOString();\nvar apiResponse = { success:false, requestId:c.requestId, applicationId:c.applicationId, documentId:c.documentId, status:c.errorCode||'INVALID_FILE', message:c.message||'Invalid file.', data:{}, issues:[c.errorCode||'INVALID_FILE'], confidence:0, timestamp:now };\nreturn [{ json: { apiResponse:apiResponse, audit_event_type:'FILE_REJECTED', audit_severity:'ERROR', audit_details:c.message||'Invalid file', requestId:c.requestId, applicationId:c.applicationId, documentId:c.documentId } }];"
+      },
+      "id": "57f1d23b-2bb4-471c-b3a0-a122c5dc4fc7",
+      "name": "Build INVALID_FILE",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        224,
+        1488
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Document Upload": {
+      "main": [
+        [
+          {
+            "node": "Validate File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate File": {
+      "main": [
+        [
+          {
+            "node": "Is File Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is File Valid?": {
+      "main": [
+        [
+          {
+            "node": "Route By File Type",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build INVALID_FILE",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route By File Type": {
+      "main": [
+        [
+          {
+            "node": "Analyze Document (Vision)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Analyze Document (PDF)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Office Format Sub-Router",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Extract Spreadsheet",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build UNSUPPORTED",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Analyze Document (Vision)": {
+      "main": [
+        [
+          {
+            "node": "Parse Vision Analysis",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Vision Analysis": {
+      "main": [
+        [
+          {
+            "node": "Document Detected?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Document Detected?": {
+      "main": [
+        [
+          {
+            "node": "Quality OK?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build NO_DOCUMENT_DETECTED",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Quality OK?": {
+      "main": [
+        [
+          {
+            "node": "Confidence OK?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build LOW_QUALITY",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Confidence OK?": {
+      "main": [
+        [
+          {
+            "node": "Expected Type Check",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build UNKNOWN",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Expected Type Check": {
+      "main": [
+        [
+          {
+            "node": "Type Matches Expected?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Type Matches Expected?": {
+      "main": [
+        [
+          {
+            "node": "Not Duplicate By Doc Type",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build WRONG_DOCUMENT",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Not Duplicate By Doc Type": {
+      "main": [
+        [
+          {
+            "node": "Extract Fields (AI)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Fields (AI)": {
+      "main": [
+        [
+          {
+            "node": "Validate Fields",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Fields": {
+      "main": [
+        [
+          {
+            "node": "Save Analysis",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save Analysis": {
+      "main": [
+        [
+          {
+            "node": "Fetch Application Documents",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Application Documents": {
+      "main": [
+        [
+          {
+            "node": "Cross-Document Intelligence",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Cross-Document Intelligence": {
+      "main": [
+        [
+          {
+            "node": "Compute Decision",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Compute Decision": {
+      "main": [
+        [
+          {
+            "node": "Update Record",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Record": {
+      "main": [
+        [
+          {
+            "node": "Write Audit Log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Write Audit Log": {
+      "main": [
+        [
+          {
+            "node": "Needs Human Review?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Needs Human Review?": {
+      "main": [
+        [
+          {
+            "node": "Add to Review Queue",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "API Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Add to Review Queue": {
+      "main": [
+        [
+          {
+            "node": "API Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build WRONG_DOCUMENT": {
+      "main": [
+        [
+          {
+            "node": "Log Rejection",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "API Response (Rejected)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build UNKNOWN": {
+      "main": [
+        [
+          {
+            "node": "Log Rejection",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "API Response (Rejected)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build LOW_QUALITY": {
+      "main": [
+        [
+          {
+            "node": "Log Rejection",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "API Response (Rejected)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build NO_DOCUMENT_DETECTED": {
+      "main": [
+        [
+          {
+            "node": "Log Rejection",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "API Response (Rejected)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Analyze Document (PDF)": {
+      "main": [
+        [
+          {
+            "node": "Parse PDF Analysis",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse PDF Analysis": {
+      "main": [
+        [
+          {
+            "node": "Document Detected?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Office Format Sub-Router": {
+      "main": [
+        [
+          {
+            "node": "Extract RTF Text",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Extract TXT Text",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "DOCX/DOC Text Extract",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract RTF Text": {
+      "main": [
+        [
+          {
+            "node": "Normalize Office Text",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Office Text": {
+      "main": [
+        [
+          {
+            "node": "Analyze Document (Text)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Analyze Document (Text)": {
+      "main": [
+        [
+          {
+            "node": "Parse Text Analysis",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Text Analysis": {
+      "main": [
+        [
+          {
+            "node": "Document Detected?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract TXT Text": {
+      "main": [
+        [
+          {
+            "node": "Normalize Office Text",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "DOCX/DOC Text Extract": {
+      "main": [
+        [
+          {
+            "node": "Normalize Office Text",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Spreadsheet": {
+      "main": [
+        [
+          {
+            "node": "Aggregate Spreadsheet Rows",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aggregate Spreadsheet Rows": {
+      "main": [
+        [
+          {
+            "node": "Analyze Document (Spreadsheet)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Analyze Document (Spreadsheet)": {
+      "main": [
+        [
+          {
+            "node": "Parse Spreadsheet Analysis",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Spreadsheet Analysis": {
+      "main": [
+        [
+          {
+            "node": "Document Detected?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build UNSUPPORTED": {
+      "main": [
+        [
+          {
+            "node": "Log Rejection",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "API Response (Rejected)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build INVALID_FILE": {
+      "main": [
+        [
+          {
+            "node": "Log Rejection",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "API Response (Rejected)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "abe35410-21be-4fac-a6d6-718323713d09",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "15a90feb908a5181b54ed32b2ef9406be4852d17fa0a360ca2a12625db0a865e"
+  },
+  "nodeGroups": [],
+  "id": "gbkTRKKsNMSGJDxx",
+  "tags": []
+}
