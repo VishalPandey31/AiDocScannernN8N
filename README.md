@@ -57,6 +57,15 @@ Most systems stop at basic OCR. DocSure understands the **complete application c
    npm run dev
    ```
 
+### Setting up the n8n AI Workflow
+1. Install and start [n8n](https://n8n.io/) locally or use the cloud version.
+2. Open your n8n dashboard in the browser (usually `http://localhost:5678`).
+3. Create a new Workflow by clicking **Add Workflow**.
+4. Click the **`...`** (options menu) on the top right corner and select **Import from File**.
+5. Select the `DocSure AI - Document Verification (1).json` file located in this root directory.
+6. Make sure to configure your **Credentials** inside n8n for any required nodes (like Google Gemini API Key).
+7. Toggle the workflow to **Active**!
+
 ## Included Demo Data
 Run the dummy seed initialization to deploy test-users with cross-document mismatches.
 ```bash
